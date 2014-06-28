@@ -1,4 +1,13 @@
 png2gb
 ======
 
-A simple command line image file to game boy .c array converter
+A simple command line image file to gameboy .c array converter.
+Intended to be used with GBDK http://gbdk.sourceforge.net/
+
+Build
+======
+
+cd to png2gb type
+<code>make all</code>
+
+Test compiled on Linux and OSX
