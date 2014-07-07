@@ -7,12 +7,12 @@
 //
 
 #define STB_IMAGE_IMPLEMENTATION
-//#include <iostream>
+
 #include <stb_image.h>
 #include <string>
 #include <list>
 
-const char* VERSION = "0.2b";
+const char* VERSION = "0.5b";
 
 struct RawPixel {
 	unsigned char gray;
@@ -23,24 +23,23 @@ struct GBPixel {
 	unsigned char index;
 };
 
+//Setting
 unsigned char pallet[] = {0, 1, 2, 3};
 bool invertPixels = false;
 bool printDefines = true;
+bool mapMode = false;
 
 using namespace std;
 
 string HEADER = "//Exported by png2gb \n\n\n";
 string START_ARRAY = "const unsigned char %s_data[] = {\n";
+string START_TILESET = "const unsigned char %s_tileset[] = {\n";
+string START_MAP = "const unsigned char %s_map[] = {\n";
 string END_ARRAY = "};\n";
 
-int decodeImageFile(const string& imageFilePath, string& dataString, string& defineString, const int offset, int& out_size, const bool lastImage) {
-	char BUFFER[1024];
-	
-	size_t lastSlash = imageFilePath.find_last_of('/');
-	size_t lastDot = imageFilePath.find_last_of('.');
-	
-	string imgName = imageFilePath.substr(lastSlash+1, lastDot-(lastSlash+1));
-	string fileName = imageFilePath.substr(lastSlash+1, imageFilePath.length()-(lastSlash+1));
+char BUFFER[1024];
+
+int decodeImageFile(const string& imageFilePath, int& width, int& height, GBPixel*& gbPixels) {
 	
 	FILE* imgFile = fopen(imageFilePath.c_str(), "r");
 	if(imgFile == NULL) {
@@ -48,8 +47,6 @@ int decodeImageFile(const string& imageFilePath, string& dataString, string& def
 		return 1;
 	}
 	
-	int width;
-	int height;
 	int comp;
 	
 	RawPixel* pixels = (RawPixel*)stbi_load_from_file(imgFile, &width, &height, &comp, STBI_grey_alpha);
@@ -60,10 +57,7 @@ int decodeImageFile(const string& imageFilePath, string& dataString, string& def
 		return 2;
 	}
 	
-	GBPixel* gbPixels = (GBPixel*)malloc(sizeof(GBPixel)*pixelCount);
-	
-	int tilesWidth = width/8;
-	int tilesHeight = height/8;
+	gbPixels = (GBPixel*)malloc(sizeof(GBPixel)*pixelCount);
 	
 	for (int i = 0; i < pixelCount; ++i) {
 		if(pixels[i].alpha == 0) {
@@ -75,6 +69,43 @@ int decodeImageFile(const string& imageFilePath, string& dataString, string& def
 		}
 	}
 	
+	free(pixels);
+	
+	return 0;
+}
+
+
+string writePixelTileRow(const GBPixel* gbPixels) {
+	unsigned char hBits = 0;
+	unsigned char lBits = 0;
+	
+	for (int x = 0; x < 8; ++x) {
+		lBits = lBits << 1;
+		hBits = hBits << 1;
+		
+		unsigned char p = gbPixels[x].index;
+		if(p == 1 || p == 3)
+			lBits += 1;
+		if(p == 2 || p == 3)
+			hBits += 1;
+	}
+	
+	sprintf(BUFFER, "0x%02x,0x%02x", lBits, hBits);
+	return string(BUFFER);
+}
+
+void writeSpriteData(const string& imageFilePath, GBPixel* gbPixels, const int width, const int height,  string& dataString, string& defineString, const int offset, int& out_size, const bool lastImage) {
+	
+	size_t lastSlash = imageFilePath.find_last_of('/');
+	size_t lastDot = imageFilePath.find_last_of('.');
+	
+	string imgName = imageFilePath.substr(lastSlash+1, lastDot-(lastSlash+1));
+	string fileName = imageFilePath.substr(lastSlash+1, imageFilePath.length()-(lastSlash+1));
+	
+	const int pixelCount = width*height;
+	
+	int tilesWidth = width/8;
+	int tilesHeight = height/8;
 	
 	int imageSize = out_size = pixelCount/64;
 	sprintf(BUFFER, "#define %s_offset %i\n", imgName.c_str(), offset);
@@ -94,24 +125,8 @@ int decodeImageFile(const string& imageFilePath, string& dataString, string& def
 			
 			for (int y = 0; y < 8; ++y) {
 				
-				unsigned char hBits = 0;
-				unsigned char lBits = 0;
-				
 				const int pixelRowI = tilePixelI + y*width;
-				
-				for (int x = 0; x < 8; ++x) {
-					lBits = lBits << 1;
-					hBits = hBits << 1;
-					
-					unsigned char p = gbPixels[pixelRowI+x].index;
-					if(p == 1 || p == 3)
-						lBits += 1;
-					if(p == 2 || p == 3)
-						hBits += 1;
-				}
-				
-				sprintf(BUFFER, "0x%02x,0x%02x", lBits, hBits);
-				dataString.append(BUFFER);
+				dataString.append(writePixelTileRow(&gbPixels[pixelRowI]));
 				
 				if(!(pixelRowI+8 == pixelCount && lastImage))
 					dataString.append(",");
@@ -119,13 +134,129 @@ int decodeImageFile(const string& imageFilePath, string& dataString, string& def
 			dataString.append("\n");
 		}
 	}
-	
-	free(gbPixels);
-	
-	
-	
-	return 0;
 }
+
+class GBTile {
+public:
+	GBTile() {
+		gbPixels = new GBPixel[8*8];
+	}
+	~GBTile() {
+		delete this->gbPixels;
+	}
+	GBPixel* gbPixels;
+	
+};
+
+void writeMapData(const string& imageFilePath, GBPixel* gbPixels, const int width, const int height, string& dataString, string& defineString) {
+	int tilesWidth = width/8;
+	int tilesHeight = height/8;
+	
+	const int tileCount = tilesWidth*tilesHeight;
+	unsigned char* mapData = (unsigned char*)malloc(sizeof(unsigned char)*tileCount);
+	list<GBTile*> tiles;
+	
+	int map_i = 0;
+	for (int ty = 0; ty < tilesHeight; ++ty) {
+		for (int tx = 0; tx < tilesWidth; ++tx) {
+			const int tilePixelI = ((ty*width)*8) + (tx * 8);
+			
+			GBTile* newTile = new GBTile();
+			
+			for (int y = 0; y < 8; ++y) {
+				const int pixelRowI = tilePixelI + y*width;
+				memcpy(&(newTile->gbPixels[y*8]), &(gbPixels[pixelRowI]), 8);
+			}
+			
+			int tile_i = 0;
+			bool foundCopy = false;
+			for (list<GBTile*>::const_iterator tile = tiles.begin(); tile != tiles.end(); ++tile) {
+				if (memcmp(newTile->gbPixels, (*tile)->gbPixels, 8*8) == 0) {
+					foundCopy = true;
+					break;
+				}
+				++tile_i;
+			}
+			
+			if(!foundCopy) {
+				tiles.push_back(newTile);
+				mapData[map_i] = tile_i;
+			} else {
+				mapData[map_i] = tile_i;
+				free(newTile);
+			}
+			printf("%i -> %lu\n", tile_i, tiles.size());
+			
+			++map_i;
+		}
+	}
+	
+	printf("tiles: %lu, map: %i", tiles.size(), tilesWidth*tilesHeight);
+	
+	size_t lastSlash = imageFilePath.find_last_of('/');
+	size_t lastDot = imageFilePath.find_last_of('.');
+	
+	string imgName = imageFilePath.substr(lastSlash+1, lastDot-(lastSlash+1));
+	string fileName = imageFilePath.substr(lastSlash+1, imageFilePath.length()-(lastSlash+1));
+	
+	
+	sprintf(BUFFER, "#define %s_tileset_size %i\n\n", imgName.c_str(), (int)tiles.size());
+	defineString.append(BUFFER);
+	
+	sprintf(BUFFER, "#define %s_map_width %i\n\n", imgName.c_str(), tilesWidth);
+	defineString.append(BUFFER);
+	
+	sprintf(BUFFER, "#define %s_map_height %i\n\n", imgName.c_str(), tilesHeight);
+	defineString.append(BUFFER);
+	
+	sprintf(BUFFER, START_TILESET.c_str(), imgName.c_str());
+	dataString.append(BUFFER);
+	
+	int i = 1;
+	for (list<GBTile*>::const_iterator tile = tiles.begin(); tile != tiles.end(); ++tile) {
+		dataString.append("\t");
+		
+		for (int y = 0; y < 8; ++y) {
+			
+			const int pixelRowI = y*8;
+			dataString.append(writePixelTileRow(&((*tile)->gbPixels[pixelRowI])));
+			
+			if(!(i == tiles.size() && y == 7))
+				dataString.append(",");
+		}
+		++i;
+		dataString.append("\n");
+	}
+	
+	dataString.append(END_ARRAY);
+	
+	dataString.append("\n");
+	dataString.append("\n");
+	
+	sprintf(BUFFER, START_MAP.c_str(), imgName.c_str());
+	dataString.append(BUFFER);
+	
+	dataString.append("\t");
+	for (i = 0; i < tileCount; ++i) {
+		if(i%tilesWidth == 0 && i != 0)
+			dataString.append("\n\t");
+		
+		sprintf(BUFFER, "0x%02x", mapData[i]);
+		dataString.append(BUFFER);
+		
+		if(i+1 != tileCount)
+			dataString.append(",");
+		
+	}
+	dataString.append("\n");
+	dataString.append(END_ARRAY);
+	
+	
+	free(mapData);
+}
+
+
+
 
 void printHelp() {
 	printf("./png2bg [files... , options] \n");
@@ -135,11 +266,10 @@ void printHelp() {
 	printf("-i        | --invert    invertes the final pixel data\n");
 	printf("-d y/n    | --defines   turn on or off printing of defines\n");
 	printf("-h        | --help      print this message\n");
+	printf("-m        | --map       maps the first image to a tileset\n");
 }
 
 int main(int argc, const char * argv[]) {
-	char BUFFER[1024];
-	
 	string outputPath = "";
 	list<string>* inputPaths = new list<string>();
 	
@@ -176,13 +306,14 @@ int main(int argc, const char * argv[]) {
 			return 0;
 		} else if(strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
 			printHelp();
-			
 			return 0;
-		} else if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "-defines") == 0) {
+		} else if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--defines") == 0) {
 			if(i+1 >= argc)
 				continue;
 			skipNext = true;
 			printDefines = strcmp(argv[i+1], "y") == 0;
+		} else if (strcmp(argv[i], "-m") == 0 || strcmp(argv[i], "--map") == 0) {
+			mapMode = true;
 		} else {
 			inputPaths->push_back(argv[i]);
 		}
@@ -212,24 +343,48 @@ int main(int argc, const char * argv[]) {
 	fileString.append(HEADER);
 	
 	string defineString = "";
-	
 	string dataString = "";
-	sprintf(BUFFER, START_ARRAY.c_str(), fileName.c_str());
-	dataString.append(BUFFER);
 	
-	int i = 0;
-	int data_offset = 0;
-	for (list<string>::const_iterator iter = inputPaths->begin(); iter != inputPaths->end(); ++iter) {
-		int res;
-		int errCode = decodeImageFile(iter->c_str(), dataString, defineString, data_offset, res, ++i == inputPaths->size());
-		if(errCode == 0) {
-			data_offset += res;
-		} else {
-			return errCode;
+	if(!mapMode) { //Normal mode
+		sprintf(BUFFER, START_ARRAY.c_str(), fileName.c_str());
+		dataString.append(BUFFER);
+		
+		int i = 0;
+		int data_offset = 0;
+		for (list<string>::const_iterator iter = inputPaths->begin(); iter != inputPaths->end(); ++iter) {
+			int res;
+			
+			GBPixel* gbPixels;
+			int width;
+			int height;
+			
+			int errCode = decodeImageFile(iter->c_str(), width, height, gbPixels);
+			if(errCode == 0) {
+				data_offset += res;
+			} else {
+				return errCode;
+			}
+			writeSpriteData(iter->c_str(), gbPixels, width, height, dataString, defineString, data_offset, res, ++i == inputPaths->size());
+			
+			free(gbPixels);
 		}
+		
+		dataString.append(END_ARRAY);
+		
+	} else {
+		
+		GBPixel* gbPixels;
+		int width;
+		int height;
+		
+		int errCode = decodeImageFile(inputPaths->front().c_str(), width, height, gbPixels);
+		if(errCode != 0)
+			return errCode;
+		writeMapData(inputPaths->front(), gbPixels, width, height, dataString, defineString);
+		
+		
+		free(gbPixels);
 	}
-	
-	dataString.append(END_ARRAY);
 	
 	if(printDefines)
 		fileString.append(defineString);

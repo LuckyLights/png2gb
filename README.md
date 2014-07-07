@@ -1,4 +1,4 @@
 png2gb
 ======
 
-A simple command line image file to game boy .c array converter
+A simple command line image file to gameboy .c array converter.
